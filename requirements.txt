@@ -1,4 +1,5 @@
-flask==2.0.1
+flask==2.3.3
 pytest==7.4.0
 requests==2.31.0
 bandit==1.7.5
+werkzeug==2.3.7

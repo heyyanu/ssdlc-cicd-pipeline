@@ -19,4 +19,4 @@ def login():
         return jsonify({"status": "fail", "message": "Invalid credentials"}), 401
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False)

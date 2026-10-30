@@ -8,7 +8,7 @@ on:
 
 jobs:
 
-  # ─── STAGE 3 & 4 — Install Dependencies + Build ───
+  
   build:
     name: Install & Build
     runs-on: ubuntu-latest
@@ -27,7 +27,7 @@ jobs:
       - name: Build check
         run: python -m py_compile app.py && echo "Build successful"
 
-  # ─── STAGE 5 — Unit & Integration Tests ───
+  
   test:
     name: Run Tests
     runs-on: ubuntu-latest
@@ -47,7 +47,7 @@ jobs:
       - name: Run tests
         run: pytest test_app.py -v
 
-  # ─── STAGE 7 — SAST (Bandit) ───
+  
   sast:
     name: SAST Scan (Bandit)
     runs-on: ubuntu-latest
@@ -67,7 +67,7 @@ jobs:
       - name: Run Bandit SAST scan
         run: bandit -r . -ll --exclude ./.venv
 
-  # ─── STAGE 9 — Secret Scanning (GitLeaks) ───
+  
   secret-scan:
     name: Secret Scan (GitLeaks)
     runs-on: ubuntu-latest
@@ -82,3 +82,27 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    
+  sca:
+    name: SCA Scan (Snyk)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Snyk SCA scan
+        uses: snyk/actions/python@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high        

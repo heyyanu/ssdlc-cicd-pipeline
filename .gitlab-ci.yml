@@ -1,0 +1,54 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+default:
+  image: python:3.11
+  before_script:
+    - pip install -r requirements.txt
+
+stages:
+  - build
+  - test
+  - security
+
+build:
+  stage: build
+  script:
+    - python -m py_compile app.py && echo "Build successful"
+
+test:
+  stage: test
+  script:
+    - pip install pytest
+    - pytest test_app.py -v
+
+sast:
+  stage: security
+  script:
+    - pip install bandit
+    - bandit -r . -ll --exclude ./.venv
+
+semgrep:
+  stage: security
+  image: semgrep/semgrep
+  before_script: []
+  script:
+    - semgrep ci
+  variables:
+    SEMGREP_APP_TOKEN: $SEMGREP_APP_TOKEN
+
+secret-scan:
+  stage: security
+  image: zricethezav/gitleaks:latest
+  before_script: []
+  script:
+    - gitleaks detect --source . --verbose
+
+sca:
+  stage: security
+  script:
+    - npm install -g snyk
+    - snyk auth $SNYK_TOKEN
+    - snyk test --severity-threshold=high

@@ -5,6 +5,8 @@ workflow:
 
 default:
   image: python:3.11
+  tags:
+    - my-mac-runner        # ← tells GitLab to use YOUR Mac runner
   before_script:
     - pip install -r requirements.txt
 
@@ -15,23 +17,31 @@ stages:
 
 build:
   stage: build
+  tags:
+    - my-mac-runner
   script:
     - python -m py_compile app.py && echo "Build successful"
 
 test:
   stage: test
+  tags:
+    - my-mac-runner
   script:
     - pip install pytest
     - pytest test_app.py -v
 
 sast:
   stage: security
+  tags:
+    - my-mac-runner
   script:
     - pip install bandit
     - bandit -r . -ll --exclude ./.venv
 
 semgrep:
   stage: security
+  tags:
+    - my-mac-runner
   image: semgrep/semgrep
   before_script: []
   script:
@@ -41,6 +51,8 @@ semgrep:
 
 secret-scan:
   stage: security
+  tags:
+    - my-mac-runner
   image: zricethezav/gitleaks:latest
   before_script: []
   script:
@@ -48,6 +60,8 @@ secret-scan:
 
 sca:
   stage: security
+  tags:
+    - my-mac-runner
   script:
     - npm install -g snyk
     - snyk auth $SNYK_TOKEN

@@ -20,7 +20,7 @@ resource "docker_container" "staging" {
 
   ports {
     internal = 5000
-    external = 5000
+    external = 8080
   }
 
   restart = "on-failure"

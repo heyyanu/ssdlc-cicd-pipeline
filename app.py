@@ -18,5 +18,9 @@ def login():
     else:
         return jsonify({"status": "fail", "message": "Invalid credentials"}), 401
 
-if __name__ == '__main__':
-    app.run(debug=False)
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=5000,
+        debug=False
+    )

@@ -1,0 +1,30 @@
+framework:
+  - terraform
+  - dockerfile
+
+directory:
+  - terraform
+  - .
+
+check:
+  - CKV_DOCKER_1    
+  - CKV_DOCKER_2    
+  - CKV_DOCKER_3    
+  - CKV_DOCKER_4    
+  - CKV_DOCKER_7    
+
+  - CKV_TF_1        
+  - CKV_TF_2        
+
+
+skip-check:
+  - CKV_DOCKER_8    
+
+
+output:
+  - cli
+  - json
+
+soft-fail-on:
+  - LOW
+  - MEDIUM

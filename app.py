@@ -16,7 +16,7 @@ def login():
     if username == 'admin' and password == 'password123':
         return jsonify({"status": "success", "message": "Logged in!"})
     else:
-        return jsonify({"status": "fail", "message": "Invalid credential"}), 401
+        return jsonify({"status": "fail", "message": "Invalid credentials"}), 401
 
 if __name__ == '__main__':
     app.run(debug=False)

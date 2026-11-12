@@ -10,12 +10,10 @@ terraform {
 
 provider "docker" {}
 
-# Reference the image already built by Jenkins
 data "docker_image" "app" {
   name = "ssdlc-app:latest"
 }
 
-# Deploy the staging container
 resource "docker_container" "staging" {
   name  = "staging-app"
   image = data.docker_image.app.id

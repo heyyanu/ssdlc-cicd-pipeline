@@ -5,7 +5,7 @@ def get_user(username):
     cursor = conn.cursor()
     
     # Vulnerable - SQL Injection
-    query = "SELECT * FROM users WHERE username = '" + username + "'"
+    query = ("SELECT * FROM users WHERE username = ?" , (username) )
     cursor.execute(query)
     return cursor.fetchone()
 
@@ -14,6 +14,6 @@ def login(username, password):
     cursor = conn.cursor()
     
     # Vulnerable - SQL Injection
-    query = f"SELECT * FROM users WHERE username='{username}' AND password='{password}'"
-    cursor.execute(query)
+    query = (f"SELECT * FROM users WHERE username= ? AND password= ?")
+    cursor.execute(query, (username), (password))
     return cursor.fetchone()

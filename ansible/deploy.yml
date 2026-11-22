@@ -1,0 +1,118 @@
+---
+# ansible/deploy.yml
+# Replaces: terraform/main.tf + terraform/variables.tf + terraform/outputs.tf
+# What it does:
+#   1. Ensures Docker is installed and running on the EC2 host
+#   2. Authenticates to ECR
+#   3. Pulls the app image
+#   4. Replaces any running staging container
+#   5. Waits for the app to become healthy
+#
+# Equivalent Terraform resources replaced:
+#   - docker_container.staging  → community.docker.docker_container task
+#   - data.docker_image.app     → community.docker.docker_image (pull)
+#   - provider "docker"         → community.docker collection via ECR auth
+
+- name: Deploy ssdlc-app to Staging on AWS EC2
+  hosts: staging
+  become: true
+
+  vars_files:
+    - vars/main.yml
+
+  # ── Pre-tasks: idempotent host setup ───────────────────────────────────
+  pre_tasks:
+    - name: Install required system packages
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - python3-pip
+          - curl
+          - awscli
+        state: present
+        update_cache: true
+
+    - name: Install boto3 and docker Python SDK
+      ansible.builtin.pip:
+        name:
+          - boto3
+          - docker
+        state: present
+
+    - name: Ensure Docker service is running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add ansible_user to docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+  # ── Main tasks: deploy ─────────────────────────────────────────────────
+  tasks:
+    - name: Authenticate Docker with ECR
+      ansible.builtin.shell: |
+        aws ecr get-login-password --region {{ aws_region }} \
+          | docker login --username AWS --password-stdin {{ ecr_registry }}
+      environment:
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+        AWS_ACCESS_KEY_ID: "{{ lookup('env', 'AWS_ACCESS_KEY_ID') }}"
+        AWS_SECRET_ACCESS_KEY: "{{ lookup('env', 'AWS_SECRET_ACCESS_KEY') }}"
+      changed_when: true
+      no_log: true  # don't expose credentials in logs
+
+    - name: Pull latest image from ECR
+      community.docker.docker_image:
+        name: "{{ ecr_registry }}/{{ app_name }}:{{ image_tag }}"
+        source: pull
+        force_source: true
+
+    - name: Stop and remove existing staging container (if any)
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        state: absent
+        force_kill: true
+      ignore_errors: true
+
+    # Mirrors Terraform: docker_container.staging
+    # ports { internal=5000 external=8081 ip="0.0.0.0" }  → published_ports
+    # restart = "on-failure"                               → restart_policy
+    - name: Run staging container
+      community.docker.docker_container:
+        name: "{{ container_name }}"
+        image: "{{ ecr_registry }}/{{ app_name }}:{{ image_tag }}"
+        state: started
+        restart_policy: on-failure
+        restart_retries: 3
+        published_ports:
+          - "0.0.0.0:{{ external_port }}:{{ internal_port }}"
+        env:
+          FLASK_ENV: "{{ environment }}"
+        healthcheck:
+          test: ["CMD", "curl", "-f", "http://localhost:{{ internal_port }}/"]
+          interval: 30000000000   # 30s in nanoseconds
+          timeout: 10000000000    # 10s
+          retries: 3
+
+    - name: Wait for application to become healthy
+      ansible.builtin.uri:
+        url: "http://localhost:{{ external_port }}/"
+        status_code: 200
+      register: health_check
+      retries: 10
+      delay: 6
+      until: health_check.status == 200
+
+  # ── Post-tasks: report (mirrors `terraform output`) ────────────────────
+  post_tasks:
+    - name: Print deployment info
+      ansible.builtin.debug:
+        msg:
+          - "Deployment complete!"
+          - "app_url      : http://{{ ansible_host }}:{{ external_port }}"
+          - "container    : {{ container_name }}"
+          - "image        : {{ ecr_registry }}/{{ app_name }}:{{ image_tag }}"
+          - "environment  : {{ environment }}"

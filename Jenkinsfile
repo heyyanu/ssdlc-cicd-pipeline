@@ -66,20 +66,37 @@ pipeline {
                     .ci-tools/pip-audit/bin/pip-audit --version
                     .ci-tools/ansible/bin/ansible  --version
 
-                    echo "── Node.js + cdxgen (SBOM / CycloneDX) ─────"
-                    if ! command -v node >/dev/null 2>&1; then
-                        echo "Installing Node.js 20..."
-                        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-                        apt-get install -y nodejs
+                    echo "── cdxgen (SBOM / CycloneDX) ────────────────"
+                    if [ ! -x .ci-tools/bin/cdxgen ]; then
+                        # Use the standalone Linux AMD64 binary. This avoids
+                        # apt/npm global installs and does not require root.
+                        ARCH="$(uname -m)"
+                        case "$ARCH" in
+                            x86_64|amd64) CDXGEN_ASSET="cdxgen-linux-amd64" ;;
+                            *)
+                                echo "Unsupported cdxgen architecture: $ARCH (this pipeline is configured for Linux AMD64)." >&2
+                                exit 1
+                                ;;
+                        esac
+
+                        CDXGEN_VERSION="v13.8.0"
+                        CDXGEN_BASE_URL="https://github.com/cdxgen/cdxgen/releases/download/${CDXGEN_VERSION}"
+                        TMP_DIR="$(mktemp -d)"
+                        trap 'rm -rf "$TMP_DIR"' EXIT
+
+                        curl -fsSL \
+                            "${CDXGEN_BASE_URL}/${CDXGEN_ASSET}" \
+                            -o "$TMP_DIR/${CDXGEN_ASSET}"
+                        curl -fsSL \
+                            "${CDXGEN_BASE_URL}/${CDXGEN_ASSET}.sha256" \
+                            -o "$TMP_DIR/${CDXGEN_ASSET}.sha256"
+
+                        # Verify the downloaded executable before running it.
+                        (cd "$TMP_DIR" && sha256sum -c "${CDXGEN_ASSET}.sha256")
+                        install -m 0755 "$TMP_DIR/${CDXGEN_ASSET}" .ci-tools/bin/cdxgen
                     fi
 
-                    if ! command -v cdxgen >/dev/null 2>&1; then
-                        echo "Installing cdxgen..."
-                        npm install -g @cyclonedx/cdxgen
-                    fi
-
-                    node --version
-                    cdxgen --version
+                    .ci-tools/bin/cdxgen --version
 
                     echo "Security tools ready!"
                 '''
@@ -184,10 +201,9 @@ pipeline {
                     echo "Generating CycloneDX SBOM..."
                     mkdir -p sbom-output
 
-                    cdxgen \
+                    .ci-tools/bin/cdxgen \
                         --type python \
                         --output sbom-output/sbom.json \
-                        --format json \
                         .
 
                     echo "── SBOM summary ─────────────────────────────"

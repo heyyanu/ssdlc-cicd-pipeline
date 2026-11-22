@@ -61,15 +61,24 @@ pipeline {
                         .ci-tools/ansible/bin/ansible-galaxy collection install community.docker
                     fi
 
-                    echo "── cdxgen (SBOM / CycloneDX) ────────────────"
-                    if ! command -v cdxgen >/dev/null 2>&1; then
-                        npm install -g @cyclonedx/cdxgen
-                    fi
-
                     .ci-tools/semgrep/bin/semgrep  --version
                     .ci-tools/checkov/bin/checkov  --version
                     .ci-tools/pip-audit/bin/pip-audit --version
                     .ci-tools/ansible/bin/ansible  --version
+
+                    echo "── Node.js + cdxgen (SBOM / CycloneDX) ─────"
+                    if ! command -v node >/dev/null 2>&1; then
+                        echo "Installing Node.js 20..."
+                        curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+                        apt-get install -y nodejs
+                    fi
+
+                    if ! command -v cdxgen >/dev/null 2>&1; then
+                        echo "Installing cdxgen..."
+                        npm install -g @cyclonedx/cdxgen
+                    fi
+
+                    node --version
                     cdxgen --version
 
                     echo "Security tools ready!"
@@ -219,7 +228,7 @@ PYEOF
             }
         }
 
-        // ── 11. Build Docker image ────────────────────────────────────────
+        // ── 10. Build Docker image ────────────────────────────────────────
         stage('Build Docker Image') {
             steps {
                 sh '''
@@ -232,7 +241,7 @@ PYEOF
             }
         }
 
-        // ── 12. Push to ECR ──────────────────────────────────────────────
+        // ── 11. Push to ECR ──────────────────────────────────────────────
         stage('Push to ECR') {
             steps {
                 sh '''
@@ -251,7 +260,7 @@ PYEOF
             }
         }
 
-        // ── 13. Deploy to Staging — Ansible (replaces Terraform stage) ───
+        // ── 12. Deploy to Staging — Ansible (replaces Terraform stage) ───
         stage('Deploy to Staging - Ansible') {
             steps {
                 dir('ansible') {
@@ -285,7 +294,7 @@ INI
             }
         }
 
-        // ── 14. DAST — OWASP ZAP ─────────────────────────────────────────
+        // ── 13. DAST — OWASP ZAP ─────────────────────────────────────────
         stage('DAST - OWASP ZAP') {
             steps {
                 sh '''
@@ -320,7 +329,7 @@ INI
             }
         }
 
-        // ── 15. Deploy to Production (manual gate) ───────────────────────
+        // ── 14. Deploy to Production (manual gate) ───────────────────────
         stage('Deploy to Production') {
             steps {
                 input message: 'Deploy to Production?',

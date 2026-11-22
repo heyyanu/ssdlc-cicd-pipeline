@@ -1,25 +1,24 @@
 framework:
-  - terraform
+  - ansible
   - dockerfile
 
 directory:
-  - terraform
+  - ansible
   - .
 
 check:
-  - CKV_DOCKER_1    # shh
-  - CKV_DOCKER_2    # health check
-  - CKV_DOCKER_3    # user created
-  - CKV_DOCKER_4    # copy
-  - CKV_DOCKER_7    # latest
+  - CKV_DOCKER_1    # do not use sudo in RUN
+  - CKV_DOCKER_2    # health check exists
+  - CKV_DOCKER_3    # non-root user created
+  - CKV_DOCKER_4    # use COPY not ADD
+  - CKV_DOCKER_7    # do not use :latest tag
 
-  - CKV_TF_1       # commit hash 
-  - CKV_TF_2       # tag and version 
-
+  - CKV2_ANSIBLE_1  # do not use shell/command module when alternatives exist
+  - CKV2_ANSIBLE_2  # use become_user with become
+  - CKV2_ANSIBLE_3  # do not use no_log: false on sensitive tasks
 
 skip-check:
-  - CKV_DOCKER_8    
-
+  - CKV_DOCKER_8    # do not store credentials in ENV (handled via Jenkins credentials)
 
 output:
   - cli

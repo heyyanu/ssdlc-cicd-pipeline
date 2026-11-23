@@ -124,7 +124,7 @@ pipeline {
             steps {
                 sh '''
                     set -eu
-                    .venv/bin/python -m pytest test_app.py -v
+                    .venv/bin/python -m pytest app.py -v
                 '''
             }
         }

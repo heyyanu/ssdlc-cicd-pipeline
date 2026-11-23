@@ -3,20 +3,12 @@ pipeline {
 
     options {
         disableConcurrentBuilds()
-    }
-
-    environment {
-        SEMGREP_APP_TOKEN  = credentials('SEMGREP_APP_TOKEN')
-        AWS_REGION         = credentials('AWS_REGION')
-        ECR_REGISTRY       = credentials('ECR_REGISTRY')
-        AWS_ACCESS_KEY_ID  = credentials('AWS_ACCESS_KEY_ID')
-        AWS_SECRET_ACCESS_KEY = credentials('AWS_SECRET_ACCESS_KEY')
-        EC2_HOST           = credentials('EC2_HOST')
-        EC2_SSH_KEY        = credentials('EC2_SSH_KEY')
+        skipDefaultCheckout(true)
+        timestamps()
+        timeout(time: 60, unit: 'MINUTES')
     }
 
     stages {
-        // 1. Checkout source and derive the immutable image tag after checkout.
         stage('Checkout') {
             steps {
                 git branch: 'main',
@@ -31,134 +23,91 @@ pipeline {
             }
         }
 
-        // 2. Install security tooling in the workspace; no apt, sudo, or root access.
         stage('Install Security Tools') {
             steps {
                 sh '''
                     set -eu
                     mkdir -p .ci-tools/bin
 
-                    echo "── Semgrep ──────────────────────────────────"
                     if [ ! -x .ci-tools/semgrep/bin/semgrep ]; then
                         python3 -m venv .ci-tools/semgrep
-                        .ci-tools/semgrep/bin/python -m pip install --upgrade pip semgrep
+                        .ci-tools/semgrep/bin/python -m pip install --upgrade pip
+                        .ci-tools/semgrep/bin/python -m pip install semgrep==1.184.0
                     fi
 
-                    echo "── Checkov ──────────────────────────────────"
                     if [ ! -x .ci-tools/checkov/bin/checkov ]; then
                         python3 -m venv .ci-tools/checkov
-                        .ci-tools/checkov/bin/python -m pip install --upgrade pip checkov
+                        .ci-tools/checkov/bin/python -m pip install --upgrade pip
+                        .ci-tools/checkov/bin/python -m pip install checkov==3.4.3
                     fi
 
-                    echo "── pip-audit ────────────────────────────────"
                     if [ ! -x .ci-tools/pip-audit/bin/pip-audit ]; then
                         python3 -m venv .ci-tools/pip-audit
-                        .ci-tools/pip-audit/bin/python -m pip install --upgrade pip pip-audit
+                        .ci-tools/pip-audit/bin/python -m pip install --upgrade pip
+                        .ci-tools/pip-audit/bin/python -m pip install pip-audit==2.10.1
                     fi
 
-                    echo "── Ansible + boto3 + community.docker ───────"
                     if [ ! -x .ci-tools/ansible/bin/ansible ]; then
                         python3 -m venv .ci-tools/ansible
-                        .ci-tools/ansible/bin/python -m pip install --upgrade pip ansible boto3
-                        .ci-tools/ansible/bin/ansible-galaxy collection install community.docker
+                        .ci-tools/ansible/bin/python -m pip install --upgrade pip
+                        .ci-tools/ansible/bin/python -m pip install ansible-core==2.22.0
                     fi
 
-                    echo "── AWS CLI v2 (workspace-local) ─────────────"
+                    # Workspace-local AWS CLI v2. Python ZIP extraction does not
+                    # preserve Unix executable bits, so restore those from ZIP metadata.
                     if [ ! -x .ci-tools/bin/aws ]; then
-                        # Use the official AWS CLI ZIP installer directly.
-                        # This avoids the install.sh GPG check, which cannot run
-                        # in this Jenkins image because gpg is not installed.
-                        # The AWS documentation identifies ZIP signature
-                        # verification as an optional, separate GnuPG step.
                         ARCH="$(uname -m)"
                         case "$ARCH" in
                             x86_64|amd64) AWSCLI_ARCH="x86_64" ;;
                             aarch64|arm64) AWSCLI_ARCH="aarch64" ;;
-                            *)
-                                echo "Unsupported AWS CLI architecture: $ARCH"
-                                exit 1
-                                ;;
+                            *) echo "Unsupported AWS CLI architecture: $ARCH" >&2; exit 1 ;;
                         esac
-
                         TMP_DIR="$(mktemp -d)"
                         trap 'rm -rf "$TMP_DIR"' EXIT
-
                         curl -fsSL \
                             "https://awscli.amazonaws.com/awscli-exe-linux-${AWSCLI_ARCH}.zip" \
                             -o "$TMP_DIR/awscliv2.zip"
-
-                        # Python's zipfile extraction does not restore Unix
-                        # executable bits. Restore the permission bits recorded
-                        # in the official ZIP before running the installer.
-                        python3 -m zipfile -e \
-                            "$TMP_DIR/awscliv2.zip" "$TMP_DIR"
+                        python3 -m zipfile -e "$TMP_DIR/awscliv2.zip" "$TMP_DIR"
                         python3 - "$TMP_DIR/awscliv2.zip" "$TMP_DIR" <<'PYEOF'
 import os
 import pathlib
 import sys
 import zipfile
-
 archive_path, extract_root = sys.argv[1:]
 root = pathlib.Path(extract_root)
 with zipfile.ZipFile(archive_path) as archive:
     for entry in archive.infolist():
         mode = (entry.external_attr >> 16) & 0o777
-        if not entry.is_dir() and mode & 0o111:
-            target = root / entry.filename
-            if target.is_file():
-                os.chmod(target, mode)
+        target = root / entry.filename
+        if not entry.is_dir() and mode & 0o111 and target.is_file():
+            os.chmod(target, mode)
 PYEOF
-
-                        # Explicitly ensure the installer and primary CLI
-                        # launcher are executable even if ZIP mode metadata
-                        # is absent or incomplete.
                         chmod 0755 "$TMP_DIR/aws/install" "$TMP_DIR/aws/dist/aws"
                         if [ -f "$TMP_DIR/aws/dist/aws_completer" ]; then
                             chmod 0755 "$TMP_DIR/aws/dist/aws_completer"
                         fi
-
-                        # Fail clearly if the archive did not provide the
-                        # expected executable files.
-                        test -x "$TMP_DIR/aws/install"
-                        test -x "$TMP_DIR/aws/dist/aws"
-
-                        rm -rf .ci-tools/aws-cli
-                        rm -f .ci-tools/bin/aws
                         "$TMP_DIR/aws/install" \
                             --install-dir "$PWD/.ci-tools/aws-cli" \
                             --bin-dir "$PWD/.ci-tools/bin"
-
                         rm -rf "$TMP_DIR"
                         trap - EXIT
                     fi
 
-                    echo "── cdxgen (standalone, checksum verified) ──"
+                    # Standalone cdxgen binary, pinned and checksum-verified.
                     if [ ! -x .ci-tools/bin/cdxgen ]; then
                         ARCH="$(uname -m)"
                         case "$ARCH" in
                             x86_64|amd64) CDXGEN_ASSET="cdxgen-linux-amd64" ;;
-                            *)
-                                echo "Unsupported cdxgen architecture: $ARCH"
-                                echo "This Jenkinsfile currently configures the Linux AMD64 release binary."
-                                exit 1
-                                ;;
+                            *) echo "Unsupported cdxgen architecture: $ARCH" >&2; exit 1 ;;
                         esac
-
                         CDXGEN_VERSION="v13.8.0"
                         CDXGEN_BASE="https://github.com/cdxgen/cdxgen/releases/download/${CDXGEN_VERSION}"
                         TMP_DIR="$(mktemp -d)"
                         trap 'rm -rf "$TMP_DIR"' EXIT
-
-                        curl -fsSL "${CDXGEN_BASE}/${CDXGEN_ASSET}" \
-                            -o "$TMP_DIR/$CDXGEN_ASSET"
-                        curl -fsSL "${CDXGEN_BASE}/${CDXGEN_ASSET}.sha256" \
-                            -o "$TMP_DIR/${CDXGEN_ASSET}.sha256"
-
-                        (
-                            cd "$TMP_DIR"
-                            sha256sum -c "${CDXGEN_ASSET}.sha256"
-                        )
-                        install -m 0755 "$TMP_DIR/$CDXGEN_ASSET" .ci-tools/bin/cdxgen
+                        curl -fsSL "${CDXGEN_BASE}/${CDXGEN_ASSET}" -o "$TMP_DIR/${CDXGEN_ASSET}"
+                        curl -fsSL "${CDXGEN_BASE}/${CDXGEN_ASSET}.sha256" -o "$TMP_DIR/${CDXGEN_ASSET}.sha256"
+                        (cd "$TMP_DIR" && sha256sum -c "${CDXGEN_ASSET}.sha256")
+                        install -m 0755 "$TMP_DIR/${CDXGEN_ASSET}" .ci-tools/bin/cdxgen
                         rm -rf "$TMP_DIR"
                         trap - EXIT
                     fi
@@ -169,13 +118,11 @@ PYEOF
                     .ci-tools/ansible/bin/ansible --version
                     .ci-tools/bin/aws --version
                     .ci-tools/bin/cdxgen --version
-
                     echo "Security tools ready!"
                 '''
             }
         }
 
-        // 3. Build Python application.
         stage('Build') {
             steps {
                 sh '''
@@ -191,7 +138,6 @@ PYEOF
             }
         }
 
-        // 4. Unit tests.
         stage('Test') {
             steps {
                 sh '''
@@ -201,31 +147,31 @@ PYEOF
             }
         }
 
-        // 5. SAST — Bandit.
         stage('SAST - Bandit') {
             steps {
                 sh '''
                     set -eu
-                    .venv/bin/python -m bandit \
-                        -r . \
-                        -ll \
-                        --exclude ./.venv,./.ci-tools,./ansible
+                    .venv/bin/python -m bandit -r . -ll \
+                        --exclude ./.venv,./.ci-tools,./ansible,./sbom-output
                 '''
             }
         }
 
-        // 6. SAST — Semgrep.
         stage('Semgrep') {
             steps {
-                sh '''
-                    set -eu
-                    .ci-tools/semgrep/bin/semgrep ci --no-suppress-errors
-                    echo "Semgrep scan completed!"
-                '''
+                withCredentials([
+                    string(credentialsId: 'SEMGREP_APP_TOKEN', variable: 'SEMGREP_APP_TOKEN')
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        .ci-tools/semgrep/bin/semgrep ci --no-suppress-errors
+                        echo "Semgrep scan completed!"
+                    '''
+                }
             }
         }
 
-        // 7. Secret scanning — Gitleaks.
         stage('Secret Scan - Gitleaks') {
             steps {
                 sh '''
@@ -235,24 +181,23 @@ PYEOF
                     case "$ARCH" in
                         x86_64) GITLEAKS_ARCH="x64" ;;
                         aarch64|arm64) GITLEAKS_ARCH="arm64" ;;
-                        *) echo "Unsupported Gitleaks architecture: $ARCH"; exit 1 ;;
+                        *) echo "Unsupported Gitleaks architecture: $ARCH" >&2; exit 1 ;;
                     esac
-
+                    ASSET="gitleaks_${VERSION}_linux_${GITLEAKS_ARCH}.tar.gz"
+                    BASE="https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}"
                     TMP_DIR="$(mktemp -d)"
                     trap 'rm -rf "$TMP_DIR"' EXIT
-                    curl -fsSL \
-                        "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_${GITLEAKS_ARCH}.tar.gz" \
-                        -o "$TMP_DIR/gitleaks.tar.gz"
-                    tar -xzf "$TMP_DIR/gitleaks.tar.gz" -C "$TMP_DIR" gitleaks
+                    curl -fsSL "${BASE}/${ASSET}" -o "$TMP_DIR/${ASSET}"
+                    curl -fsSL "${BASE}/gitleaks_${VERSION}_checksums.txt" -o "$TMP_DIR/checksums.txt"
+                    (cd "$TMP_DIR" && grep -F "${ASSET}" checksums.txt | sha256sum --check --status)
+                    tar -xzf "$TMP_DIR/${ASSET}" -C "$TMP_DIR" gitleaks
                     install -m 0755 "$TMP_DIR/gitleaks" .ci-tools/bin/gitleaks
-
                     .ci-tools/bin/gitleaks git --verbose .
                     echo "Gitleaks scan completed!"
                 '''
             }
         }
 
-        // 8. SCA — Python dependency audit.
         stage('SCA - Dependency Check') {
             steps {
                 sh '''
@@ -263,147 +208,146 @@ PYEOF
             }
         }
 
-        // 9. SBOM — CycloneDX. Dependency installation is disabled during scanning.
         stage('SBOM - CycloneDX') {
             steps {
                 sh '''
                     set -eu
                     mkdir -p sbom-output
-                    echo "Generating CycloneDX SBOM..."
-
                     .ci-tools/bin/cdxgen \
                         --type python \
                         --no-install-deps \
+                        --no-include-formulation \
+                        --exclude '**/.ci-tools/**' \
+                        --exclude '**/.venv/**' \
+                        --exclude '**/ansible/**' \
+                        --exclude '**/sbom-output/**' \
                         --output "$PWD/sbom-output/sbom.json" \
                         "$PWD"
-
-                    echo "── SBOM summary ─────────────────────────────"
                     python3 - <<'PYEOF'
 import json
 from pathlib import Path
-
-sbom_path = Path("sbom-output/sbom.json")
-with sbom_path.open(encoding="utf-8") as handle:
+bom_path = Path('sbom-output/sbom.json')
+with bom_path.open(encoding='utf-8') as handle:
     bom = json.load(handle)
-
-components = bom.get("components", [])
-print(f"Components: {len(components)}")
+components = bom.get('components', [])
+print(f"CycloneDX components: {len(components)}")
 for component in components:
-    name = component.get("name", "?")
-    version = component.get("version", "?")
-    purl = component.get("purl", "")
-    print(f"  {name}=={version}  ({purl})")
+    print(f"  {component.get('name', '?')}=={component.get('version', '?')}")
 PYEOF
-
                     echo "SBOM generation completed!"
                 '''
                 archiveArtifacts artifacts: 'sbom-output/sbom.json', fingerprint: true
             }
         }
 
-        // 10. IaC scanning — Ansible and Dockerfile.
         stage('IaC Scan - Checkov') {
             steps {
                 sh '''
                     set -eu
-                    echo "Scanning Ansible playbooks and Dockerfile..."
                     .ci-tools/checkov/bin/checkov \
                         -d . \
                         --framework ansible dockerfile \
                         --skip-path .ci-tools \
                         --skip-path .venv
-                    echo "IaC scan completed!"
                 '''
             }
         }
 
-        // 11. Build Docker image.
         stage('Build Docker Image') {
             steps {
                 sh '''
                     set -eu
                     docker version
-                    docker build -t "ssdlc-app:${IMAGE_TAG}" .
+                    docker build --pull -t "ssdlc-app:${IMAGE_TAG}" .
                     docker tag "ssdlc-app:${IMAGE_TAG}" ssdlc-app:latest
                     echo "Docker image built: ssdlc-app:${IMAGE_TAG}"
                 '''
             }
         }
+
         stage('ECR Network Diagnostics') {
             steps {
-                sh '''
-                    set -eu
-
-                    echo "===== Actual ECR Registry ====="
-                    echo "$ECR_REGISTRY"
-
-                    echo "===== DNS and HTTPS connectivity ====="
-
-                    curl -sS \
-                        --connect-timeout 10 \
-                        --max-time 20 \
-                        -o /dev/null \
-                        -w "HTTP Status: %{http_code}\\n" \
-                        "https://${ECR_REGISTRY}/v2/"
-
-                    echo "===== Docker Daemon Proxy ====="
-                    docker info --format \
-                        'HTTP={{.HTTPProxy}} HTTPS={{.HTTPSProxy}} NO_PROXY={{.NoProxy}}'
-
-                    echo "===== Docker Context ====="
-                    docker context show
-
-                    echo "Diagnostics completed!"
-                '''
+                withCredentials([
+                    string(credentialsId: 'AWS_REGION', variable: 'AWS_REGION'),
+                    string(credentialsId: 'ECR_REGISTRY', variable: 'ECR_REGISTRY')
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        case "$ECR_REGISTRY" in
+                            *://*|*/*) echo "ECR_REGISTRY must be a registry hostname only" >&2; exit 1 ;;
+                        esac
+                        echo "Checking ECR HTTPS endpoint..."
+                        HTTP_STATUS="$(curl -sS --connect-timeout 10 --max-time 20 \
+                            -o /dev/null -w '%{http_code}' "https://${ECR_REGISTRY}/v2/")"
+                        echo "ECR unauthenticated /v2 response: ${HTTP_STATUS} (401 is expected)"
+                        [ "$HTTP_STATUS" = "401" ] || {
+                            echo "Unexpected ECR response; check registry, DNS and network." >&2
+                            exit 1
+                        }
+                        docker info --format 'Docker proxy: HTTP={{.HTTPProxy}} HTTPS={{.HTTPSProxy}} NO_PROXY={{.NoProxy}}'
+                        docker context show
+                    '''
+                }
             }
         }
-        // 12. Push image to Amazon ECR.
+
         stage('Push to ECR') {
             steps {
-                sh '''
-                    set -eu
-                    .ci-tools/bin/aws ecr get-login-password --region "$AWS_REGION" \
-                        | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-
-                    docker tag "ssdlc-app:${IMAGE_TAG}" "${ECR_REGISTRY}/ssdlc-app:${IMAGE_TAG}"
-                    docker tag ssdlc-app:latest "${ECR_REGISTRY}/ssdlc-app:latest"
-
-                    docker push "${ECR_REGISTRY}/ssdlc-app:${IMAGE_TAG}"
-                    docker push "${ECR_REGISTRY}/ssdlc-app:latest"
-                    echo "Pushed: ${ECR_REGISTRY}/ssdlc-app:${IMAGE_TAG}"
-                '''
+                withCredentials([
+                    string(credentialsId: 'AWS_REGION', variable: 'AWS_REGION'),
+                    string(credentialsId: 'ECR_REGISTRY', variable: 'ECR_REGISTRY'),
+                    string(credentialsId: 'AWS_ACCESS_KEY_ID', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'AWS_SECRET_ACCESS_KEY', variable: 'AWS_SECRET_ACCESS_KEY')
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        DOCKER_CONFIG="$(mktemp -d)"
+                        export DOCKER_CONFIG
+                        trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+                        .ci-tools/bin/aws ecr get-login-password --region "$AWS_REGION" \
+                            | docker login --username AWS --password-stdin "$ECR_REGISTRY"
+                        docker tag "ssdlc-app:${IMAGE_TAG}" "${ECR_REGISTRY}/ssdlc-app:${IMAGE_TAG}"
+                        docker tag ssdlc-app:latest "${ECR_REGISTRY}/ssdlc-app:latest"
+                        docker push "${ECR_REGISTRY}/ssdlc-app:${IMAGE_TAG}"
+                        docker push "${ECR_REGISTRY}/ssdlc-app:latest"
+                        echo "Pushed image tag ${IMAGE_TAG} to ECR."
+                    '''
+                }
             }
         }
 
-        // 13. Deploy to staging using Ansible.
-        
-stage('Deploy to Staging - Ansible') {
-    steps {
-        withCredentials([
-            sshUserPrivateKey(
-                credentialsId: 'EC2_SSH_PRIVATE_KEY',
-                keyFileVariable: 'EC2_SSH_KEY_FILE',
-                usernameVariable: 'EC2_SSH_USER'
-            )
-        ]) {
-            dir('ansible') {
-                sh '''
-                    set -eu
-                    set +x
+        stage('Deploy to Staging - Ansible') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'AWS_REGION', variable: 'AWS_REGION'),
+                    string(credentialsId: 'ECR_REGISTRY', variable: 'ECR_REGISTRY'),
+                    string(credentialsId: 'AWS_ACCESS_KEY_ID', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'AWS_SECRET_ACCESS_KEY', variable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'EC2_HOST', variable: 'EC2_HOST'),
+                    sshUserPrivateKey(
+                        credentialsId: 'EC2_SSH_PRIVATE_KEY',
+                        keyFileVariable: 'EC2_SSH_KEY_FILE',
+                        usernameVariable: 'EC2_SSH_USER'
+                    )
+                ]) {
+                    dir('ansible') {
+                        sh '''
+                            set -eu
+                            set +x
+                            test -s "$EC2_SSH_KEY_FILE"
+                            ssh-keygen -y -f "$EC2_SSH_KEY_FILE" >/dev/null
 
-                    echo "Checking SSH private key..."
+                            ECR_PASSWORD_FILE="$(mktemp)"
+                            trap 'rm -f "$ECR_PASSWORD_FILE"' EXIT
+                            chmod 600 "$ECR_PASSWORD_FILE"
+                            ../.ci-tools/bin/aws ecr get-login-password \
+                                --region "$AWS_REGION" > "$ECR_PASSWORD_FILE"
+                            test -s "$ECR_PASSWORD_FILE"
 
-                    test -s "$EC2_SSH_KEY_FILE"
-
-                    ssh-keygen -y \
-                        -f "$EC2_SSH_KEY_FILE" \
-                        > /dev/null
-
-                    echo "Private key format is valid!"
-
-                    mkdir -p inventory
-
-                    cat > inventory/staging.ini <<INI
+                            mkdir -p inventory
+                            cat > inventory/staging.ini <<INI
 [staging]
 staging-host ansible_host=${EC2_HOST} ansible_user=${EC2_SSH_USER}
 
@@ -411,94 +355,86 @@ staging-host ansible_host=${EC2_HOST} ansible_user=${EC2_SSH_USER}
 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 INI
 
-                    echo "Testing EC2 SSH connection..."
+                            echo "Testing EC2 SSH connection..."
+                            ../.ci-tools/ansible/bin/ansible \
+                                staging -i inventory/staging.ini -m ping \
+                                --private-key "$EC2_SSH_KEY_FILE"
 
-                    ../.ci-tools/ansible/bin/ansible \
-                        staging \
-                        -i inventory/staging.ini \
-                        -m ping \
-                        --private-key "$EC2_SSH_KEY_FILE"
-
-                    echo "Starting deployment..."
-
-                    ../.ci-tools/ansible/bin/ansible-playbook \
-                        deploy.yml \
-                        -i inventory/staging.ini \
-                        --private-key "$EC2_SSH_KEY_FILE" \
-                        --extra-vars "ecr_registry=${ECR_REGISTRY} aws_region=${AWS_REGION} image_tag=${IMAGE_TAG}" \
-                        -v
-
-                    echo "Staging deployment completed!"
-                '''
+                            echo "Running Ansible deployment..."
+                            ../.ci-tools/ansible/bin/ansible-playbook \
+                                deploy.yml \
+                                -i inventory/staging.ini \
+                                --private-key "$EC2_SSH_KEY_FILE" \
+                                --extra-vars "ecr_registry=${ECR_REGISTRY} aws_region=${AWS_REGION} image_tag=${IMAGE_TAG} ecr_password_file=${ECR_PASSWORD_FILE}" \
+                                -v
+                        '''
+                    }
+                }
             }
         }
-    }
-}
 
-
-        // 14. DAST — OWASP ZAP baseline scan against staging.
         stage('DAST - OWASP ZAP') {
             steps {
-                sh '''
-                    set -eu
-                    TARGET="http://${EC2_HOST}:8081"
-                    echo "Waiting for staging app at ${TARGET}..."
-
-                    READY="false"
-                    for ATTEMPT in $(seq 1 30); do
-                        if curl -fsS "${TARGET}/" >/dev/null 2>&1; then
-                            READY="true"
-                            break
+                withCredentials([
+                    string(credentialsId: 'EC2_HOST', variable: 'EC2_HOST')
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        TARGET="http://${EC2_HOST}:8081"
+                        echo "Waiting for staging health endpoint..."
+                        READY="false"
+                        for ATTEMPT in $(seq 1 30); do
+                            if curl -fsS --max-time 5 "${TARGET}/health" >/dev/null 2>&1; then
+                                READY="true"
+                                break
+                            fi
+                            sleep 2
+                        done
+                        if [ "$READY" != "true" ]; then
+                            echo "Staging health endpoint not reachable at ${TARGET}/health" >&2
+                            exit 1
                         fi
-                        echo "Attempt ${ATTEMPT}/30 — waiting 2 seconds..."
-                        sleep 2
-                    done
-
-                    if [ "$READY" != "true" ]; then
-                        echo "Staging app not reachable at ${TARGET}!"
-                        exit 1
-                    fi
-
-                    echo "Starting OWASP ZAP baseline scan..."
-                    docker run --rm \
-                        ghcr.io/zaproxy/zaproxy:stable \
-                        zap-baseline.py \
-                        -t "$TARGET" \
-                        -I
-                    echo "DAST scan completed!"
-                '''
+                        docker run --rm ghcr.io/zaproxy/zaproxy:stable \
+                            zap-baseline.py -t "$TARGET" -I
+                        echo "DAST scan completed!"
+                    '''
+                }
             }
         }
 
-        // 15. Production promotion gate; tags the same ECR image manifest.
-        stage('Deploy to Production') {
+        // This stage promotes the same ECR manifest by tagging it production.
+        // It does NOT deploy to a separate production EC2 host.
+        stage('Promote Image in ECR - Production Tag') {
             steps {
-                input message: 'Deploy to Production?', ok: 'Yes, Deploy!'
-                sh '''
-                    set -eu
-                    .ci-tools/bin/aws ecr get-login-password --region "$AWS_REGION" \
-                        | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-
-                    MANIFEST="$(.ci-tools/bin/aws ecr batch-get-image \
-                        --repository-name ssdlc-app \
-                        --image-ids imageTag="$IMAGE_TAG" \
-                        --region "$AWS_REGION" \
-                        --query 'images[0].imageManifest' \
-                        --output text)"
-
-                    if [ -z "$MANIFEST" ] || [ "$MANIFEST" = "None" ]; then
-                        echo "Could not retrieve ECR manifest for image tag: $IMAGE_TAG"
-                        exit 1
-                    fi
-
-                    .ci-tools/bin/aws ecr put-image \
-                        --repository-name ssdlc-app \
-                        --image-tag production \
-                        --image-manifest "$MANIFEST" \
-                        --region "$AWS_REGION"
-
-                    echo "Production image tagged: ${ECR_REGISTRY}/ssdlc-app:production"
-                '''
+                input message: 'Promote this image to the ECR production tag?', ok: 'Promote image'
+                withCredentials([
+                    string(credentialsId: 'AWS_REGION', variable: 'AWS_REGION'),
+                    string(credentialsId: 'AWS_ACCESS_KEY_ID', variable: 'AWS_ACCESS_KEY_ID'),
+                    string(credentialsId: 'AWS_SECRET_ACCESS_KEY', variable: 'AWS_SECRET_ACCESS_KEY'),
+                    string(credentialsId: 'ECR_REGISTRY', variable: 'ECR_REGISTRY')
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+                        MANIFEST="$(.ci-tools/bin/aws ecr batch-get-image \
+                            --repository-name ssdlc-app \
+                            --image-ids imageTag="$IMAGE_TAG" \
+                            --region "$AWS_REGION" \
+                            --query 'images[0].imageManifest' \
+                            --output text)"
+                        if [ -z "$MANIFEST" ] || [ "$MANIFEST" = "None" ]; then
+                            echo "Could not retrieve manifest for image tag ${IMAGE_TAG}" >&2
+                            exit 1
+                        fi
+                        .ci-tools/bin/aws ecr put-image \
+                            --repository-name ssdlc-app \
+                            --image-tag production \
+                            --image-manifest "$MANIFEST" \
+                            --region "$AWS_REGION"
+                        echo "Promoted ${ECR_REGISTRY}/ssdlc-app:${IMAGE_TAG} to :production."
+                    '''
+                }
             }
         }
     }
@@ -508,9 +444,7 @@ INI
             echo 'Pipeline completed successfully!'
         }
         failure {
-            echo 'Pipeline failed! Check the console output.'
+            echo 'Pipeline failed. Review the first failed stage in the console output.'
         }
     }
 }
-
-

@@ -15,17 +15,37 @@
       ansible.builtin.assert:
         that:
           - >-
-            (ansible_distribution == 'Amazon' and
-             ansible_distribution_major_version in ['2', '2023']) or
-            ansible_os_family == 'Debian'
+            (ansible_facts['distribution'] == 'Amazon' and
+             ansible_facts['distribution_major_version'] in ['2', '2023']) or
+            ansible_facts['os_family'] == 'Debian'
           - ecr_registry is defined
           - aws_region is defined
           - image_tag is defined
-          - lookup('env', 'ECR_PASSWORD_FILE') | length > 0
+          - ecr_password_file is defined
+          - ecr_password_file | length > 0
         fail_msg: >-
           This playbook supports Amazon Linux 2, Amazon Linux 2023, Ubuntu and
           Debian. It also requires ecr_registry, aws_region, image_tag and the
-          ECR_PASSWORD_FILE environment variable supplied by Jenkins.
+          ecr_password_file path passed by Jenkins.
+
+    - name: Check the temporary ECR password file on the Jenkins controller
+      ansible.builtin.stat:
+        path: "{{ ecr_password_file }}"
+      delegate_to: localhost
+      become: false
+      register: ecr_password_file_stat
+      run_once: true
+
+    - name: Validate the temporary ECR password file
+      ansible.builtin.assert:
+        that:
+          - ecr_password_file_stat.stat.exists | default(false)
+          - ecr_password_file_stat.stat.isreg | default(false)
+          - (ecr_password_file_stat.stat.size | default(0) | int) > 0
+        fail_msg: >-
+          Jenkins did not provide a readable, non-empty ECR password file.
+          Verify the ECR token creation step and the ecr_password_file extra-var.
+      run_once: true
 
     # Amazon Linux 2023: use DNF directly. Do not use apt based only on the
     # ansible_pkg_mgr fact; this avoids the previous missing-apt executable error.
@@ -37,8 +57,8 @@
         state: present
         update_cache: true
       when:
-        - ansible_distribution == 'Amazon'
-        - ansible_distribution_major_version == '2023'
+        - ansible_facts['distribution'] == 'Amazon'
+        - ansible_facts['distribution_major_version'] == '2023'
 
     # Amazon Linux 2: Docker is installed from Amazon Linux Extras.
     - name: Install curl on Amazon Linux 2
@@ -47,8 +67,8 @@
         state: present
         update_cache: true
       when:
-        - ansible_distribution == 'Amazon'
-        - ansible_distribution_major_version == '2'
+        - ansible_facts['distribution'] == 'Amazon'
+        - ansible_facts['distribution_major_version'] == '2'
 
     - name: Install Docker using Amazon Linux Extras on Amazon Linux 2
       ansible.builtin.command:
@@ -59,8 +79,8 @@
           - -y
         creates: /usr/bin/docker
       when:
-        - ansible_distribution == 'Amazon'
-        - ansible_distribution_major_version == '2'
+        - ansible_facts['distribution'] == 'Amazon'
+        - ansible_facts['distribution_major_version'] == '2'
 
     # Debian-family distributions use APT explicitly.
     - name: Install Docker and curl on Ubuntu or Debian
@@ -71,7 +91,7 @@
         state: present
         update_cache: true
         cache_valid_time: 3600
-      when: ansible_os_family == 'Debian'
+      when: ansible_facts['os_family'] == 'Debian'
 
     - name: Ensure Docker service is enabled and running
       ansible.builtin.service:
@@ -91,7 +111,7 @@
               - AWS
               - --password-stdin
               - "{{ ecr_registry }}"
-            stdin: "{{ lookup('file', lookup('env', 'ECR_PASSWORD_FILE')) }}"
+            stdin: "{{ lookup('ansible.builtin.file', ecr_password_file) }}"
             stdin_add_newline: false
           no_log: true
           changed_when: true

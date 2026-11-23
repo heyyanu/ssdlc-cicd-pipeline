@@ -49,11 +49,12 @@
 
     # Amazon Linux 2023: use DNF directly. Do not use apt based only on the
     # ansible_pkg_mgr fact; this avoids the previous missing-apt executable error.
-    - name: Install Docker and curl on Amazon Linux 2023
+    # Amazon Linux 2023 ships curl-minimal by default. Installing the separate
+    # curl package conflicts with curl-minimal, and this deployment does not
+    # need curl on the host (the container health check uses Python).
+    - name: Install Docker on Amazon Linux 2023
       ansible.builtin.dnf:
-        name:
-          - docker
-          - curl
+        name: docker
         state: present
         update_cache: true
       when:
@@ -61,14 +62,7 @@
         - ansible_facts['distribution_major_version'] == '2023'
 
     # Amazon Linux 2: Docker is installed from Amazon Linux Extras.
-    - name: Install curl on Amazon Linux 2
-      ansible.builtin.yum:
-        name: curl
-        state: present
-        update_cache: true
-      when:
-        - ansible_facts['distribution'] == 'Amazon'
-        - ansible_facts['distribution_major_version'] == '2'
+    # No extra curl package is required on the host.
 
     - name: Install Docker using Amazon Linux Extras on Amazon Linux 2
       ansible.builtin.command:
@@ -83,11 +77,9 @@
         - ansible_facts['distribution_major_version'] == '2'
 
     # Debian-family distributions use APT explicitly.
-    - name: Install Docker and curl on Ubuntu or Debian
+    - name: Install Docker on Ubuntu or Debian
       ansible.builtin.apt:
-        name:
-          - docker.io
-          - curl
+        name: docker.io
         state: present
         update_cache: true
         cache_valid_time: 3600
@@ -219,3 +211,4 @@
           - "Container: {{ container_name }}"
           - "Image: {{ image_full_name }}"
           - "Environment: {{ deployment_environment }}"
+

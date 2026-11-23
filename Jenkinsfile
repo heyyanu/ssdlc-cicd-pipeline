@@ -65,13 +65,39 @@ pipeline {
 
                     echo "── AWS CLI v2 (workspace-local) ─────────────"
                     if [ ! -x .ci-tools/bin/aws ]; then
+                        # Use the official AWS CLI ZIP installer directly.
+                        # This avoids the install.sh GPG check, which cannot run
+                        # in this Jenkins image because gpg is not installed.
+                        # The AWS documentation identifies ZIP signature
+                        # verification as an optional, separate GnuPG step.
+                        ARCH="$(uname -m)"
+                        case "$ARCH" in
+                            x86_64|amd64) AWSCLI_ARCH="x86_64" ;;
+                            aarch64|arm64) AWSCLI_ARCH="aarch64" ;;
+                            *)
+                                echo "Unsupported AWS CLI architecture: $ARCH"
+                                exit 1
+                                ;;
+                        esac
+
                         TMP_DIR="$(mktemp -d)"
                         trap 'rm -rf "$TMP_DIR"' EXIT
-                        curl -fsSL https://awscli.amazonaws.com/v2/install.sh \
-                            -o "$TMP_DIR/aws-install.sh"
-                        XDG_DATA_HOME="$PWD/.ci-tools/aws-data" \
-                        XDG_BIN_HOME="$PWD/.ci-tools/bin" \
-                            bash "$TMP_DIR/aws-install.sh"
+
+                        curl -fsSL \
+                            "https://awscli.amazonaws.com/awscli-exe-linux-${AWSCLI_ARCH}.zip" \
+                            -o "$TMP_DIR/awscliv2.zip"
+
+                        # Python's standard-library zipfile module avoids
+                        # requiring unzip to be installed on the agent.
+                        python3 -m zipfile -e \
+                            "$TMP_DIR/awscliv2.zip" "$TMP_DIR"
+
+                        rm -rf .ci-tools/aws-cli
+                        rm -f .ci-tools/bin/aws
+                        "$TMP_DIR/aws/install" \
+                            --install-dir "$PWD/.ci-tools/aws-cli" \
+                            --bin-dir "$PWD/.ci-tools/bin"
+
                         rm -rf "$TMP_DIR"
                         trap - EXIT
                     fi
@@ -401,3 +427,4 @@ INI
         }
     }
 }
+

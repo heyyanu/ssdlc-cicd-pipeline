@@ -61,41 +61,24 @@ pipeline {
                         .ci-tools/ansible/bin/ansible-galaxy collection install community.docker
                     fi
 
+                    echo "── AWS CLI ───────────────────────────────────"
+                    if ! command -v aws >/dev/null 2>&1; then
+                        echo "Installing AWS CLI v2..."
+                        curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" \
+                            -o /tmp/awscliv2.zip
+                        unzip -q /tmp/awscliv2.zip -d /tmp/awsinstall
+                        /tmp/awsinstall/aws/install \
+                            --bin-dir /usr/local/bin \
+                            --install-dir /usr/local/aws-cli \
+                            --update
+                        rm -rf /tmp/awscliv2.zip /tmp/awsinstall
+                    fi
+
                     .ci-tools/semgrep/bin/semgrep  --version
                     .ci-tools/checkov/bin/checkov  --version
                     .ci-tools/pip-audit/bin/pip-audit --version
                     .ci-tools/ansible/bin/ansible  --version
-
-                    echo "── cdxgen (SBOM / CycloneDX) ────────────────"
-                    if [ ! -x .ci-tools/bin/cdxgen ]; then
-                        # Use the standalone Linux AMD64 binary. This avoids
-                        # apt/npm global installs and does not require root.
-                        ARCH="$(uname -m)"
-                        case "$ARCH" in
-                            x86_64|amd64) CDXGEN_ASSET="cdxgen-linux-amd64" ;;
-                            *)
-                                echo "Unsupported cdxgen architecture: $ARCH (this pipeline is configured for Linux AMD64)." >&2
-                                exit 1
-                                ;;
-                        esac
-
-                        CDXGEN_VERSION="v13.8.0"
-                        CDXGEN_BASE_URL="https://github.com/cdxgen/cdxgen/releases/download/${CDXGEN_VERSION}"
-                        TMP_DIR="$(mktemp -d)"
-                        trap 'rm -rf "$TMP_DIR"' EXIT
-
-                        curl -fsSL \
-                            "${CDXGEN_BASE_URL}/${CDXGEN_ASSET}" \
-                            -o "$TMP_DIR/${CDXGEN_ASSET}"
-                        curl -fsSL \
-                            "${CDXGEN_BASE_URL}/${CDXGEN_ASSET}.sha256" \
-                            -o "$TMP_DIR/${CDXGEN_ASSET}.sha256"
-
-                        # Verify the downloaded executable before running it.
-                        (cd "$TMP_DIR" && sha256sum -c "${CDXGEN_ASSET}.sha256")
-                        install -m 0755 "$TMP_DIR/${CDXGEN_ASSET}" .ci-tools/bin/cdxgen
-                    fi
-
+                    aws --version
                     .ci-tools/bin/cdxgen --version
 
                     echo "Security tools ready!"
@@ -192,43 +175,7 @@ pipeline {
             }
         }
 
-        // ── 9. SBOM — CycloneDX via cdxgen ──────────────────────────────
-        stage('SBOM - CycloneDX') {
-            steps {
-                sh '''
-                    set -eu
-
-                    echo "Generating CycloneDX SBOM..."
-                    mkdir -p sbom-output
-
-                    .ci-tools/bin/cdxgen \
-                        --type python \
-                        --output sbom-output/sbom.json \
-                        .
-
-                    echo "── SBOM summary ─────────────────────────────"
-                    python3 - <<'PYEOF'
-import json, sys
-with open("sbom-output/sbom.json") as f:
-    bom = json.load(f)
-components = bom.get("components", [])
-print(f"  Components : {len(components)}")
-for c in components:
-    name    = c.get("name", "?")
-    version = c.get("version", "?")
-    purl    = c.get("purl", "")
-    print(f"  {name}=={version}  ({purl})")
-PYEOF
-
-                    echo "SBOM generation completed!"
-                '''
-
-                archiveArtifacts artifacts: 'sbom-output/sbom.json',
-                                 fingerprint: true
-            }
-        }
-
-        // ── 10. IaC scan — Checkov (Ansible + Dockerfile, NOT Terraform) ─
+        // ── 9. IaC scan — Checkov (Ansible + Dockerfile, NOT Terraform) ──
         stage('IaC Scan - Checkov') {
             steps {
                 sh '''
@@ -262,8 +209,10 @@ PYEOF
             steps {
                 sh '''
                     set -eu
-                    aws ecr get-login-password --region "${AWS_REGION}" \
-                        | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+                    ECR_PASSWORD=$(aws ecr get-login-password --region "${AWS_REGION}")
+                    echo "${ECR_PASSWORD}" | docker login \
+                        --username AWS \
+                        --password-stdin "${ECR_REGISTRY}"
 
                     docker tag "ssdlc-app:${IMAGE_TAG}" "${ECR_REGISTRY}/ssdlc-app:${IMAGE_TAG}"
                     docker tag  ssdlc-app:latest        "${ECR_REGISTRY}/ssdlc-app:latest"
@@ -353,8 +302,10 @@ INI
 
                 sh '''
                     set -eu
-                    aws ecr get-login-password --region "${AWS_REGION}" \
-                        | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
+                    ECR_PASSWORD=$(aws ecr get-login-password --region "${AWS_REGION}")
+                    echo "${ECR_PASSWORD}" | docker login \
+                        --username AWS \
+                        --password-stdin "${ECR_REGISTRY}"
 
                     # Re-tag the same image digest as :production in ECR
                     MANIFEST=$(aws ecr batch-get-image \

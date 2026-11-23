@@ -376,37 +376,65 @@ PYEOF
         }
 
         // 13. Deploy to staging using Ansible.
-        stage('Deploy to Staging - Ansible') {
-            steps {
-                dir('ansible') {
-                    sh '''
-                        set -eu
-                        mkdir -p inventory
+        
+stage('Deploy to Staging - Ansible') {
+    steps {
+        withCredentials([
+            sshUserPrivateKey(
+                credentialsId: 'EC2_SSH_PRIVATE_KEY',
+                keyFileVariable: 'EC2_SSH_KEY_FILE',
+                usernameVariable: 'EC2_SSH_USER'
+            )
+        ]) {
+            dir('ansible') {
+                sh '''
+                    set -eu
+                    set +x
 
-                        KEY_FILE="$(mktemp)"
-                        trap 'rm -f "$KEY_FILE"' EXIT
-                        printf '%s' "$EC2_SSH_KEY" > "$KEY_FILE"
-                        chmod 600 "$KEY_FILE"
+                    echo "Checking SSH private key..."
 
-                        cat > inventory/staging.ini <<INI
+                    test -s "$EC2_SSH_KEY_FILE"
+
+                    ssh-keygen -y \
+                        -f "$EC2_SSH_KEY_FILE" \
+                        > /dev/null
+
+                    echo "Private key format is valid!"
+
+                    mkdir -p inventory
+
+                    cat > inventory/staging.ini <<INI
 [staging]
-staging-host ansible_host=${EC2_HOST} ansible_user=ec2-user
+staging-host ansible_host=${EC2_HOST} ansible_user=${EC2_SSH_USER}
 
 [staging:vars]
 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
 INI
 
-                        echo "Running Ansible deploy playbook..."
-                        ../.ci-tools/ansible/bin/ansible-playbook deploy.yml \
-                            --private-key "$KEY_FILE" \
-                            --extra-vars "ecr_registry=${ECR_REGISTRY} aws_region=${AWS_REGION} image_tag=${IMAGE_TAG}" \
-                            -v
+                    echo "Testing EC2 SSH connection..."
 
-                        echo "Staging deployment completed!"
-                    '''
-                }
+                    ../.ci-tools/ansible/bin/ansible \
+                        staging \
+                        -i inventory/staging.ini \
+                        -m ping \
+                        --private-key "$EC2_SSH_KEY_FILE"
+
+                    echo "Starting deployment..."
+
+                    ../.ci-tools/ansible/bin/ansible-playbook \
+                        deploy.yml \
+                        -i inventory/staging.ini \
+                        --private-key "$EC2_SSH_KEY_FILE" \
+                        --extra-vars "ecr_registry=${ECR_REGISTRY} aws_region=${AWS_REGION} image_tag=${IMAGE_TAG}" \
+                        -v
+
+                    echo "Staging deployment completed!"
+                '''
             }
         }
+    }
+}
+
 
         // 14. DAST — OWASP ZAP baseline scan against staging.
         stage('DAST - OWASP ZAP') {

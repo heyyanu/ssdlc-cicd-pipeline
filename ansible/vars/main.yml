@@ -6,7 +6,7 @@
 
 # ── Application (mirrors variables.tf defaults) ────────────────────────
 app_name: "ssdlc-app"              # var.app_name
-environment: "staging"             # var.environment
+deployment_environment: "staging"             # var.environment
 image_tag: "latest"                # overridden by Jenkins with Git SHA
 container_name: "staging-app"      # docker_container.staging.name
 

@@ -1,18 +1,3 @@
----
-# ansible/deploy.yml
-# Replaces: terraform/main.tf + terraform/variables.tf + terraform/outputs.tf
-# What it does:
-#   1. Ensures Docker is installed and running on the EC2 host
-#   2. Authenticates to ECR
-#   3. Pulls the app image
-#   4. Replaces any running staging container
-#   5. Waits for the app to become healthy
-#
-# Equivalent Terraform resources replaced:
-#   - docker_container.staging  → community.docker.docker_container task
-#   - data.docker_image.app     → community.docker.docker_image (pull)
-#   - provider "docker"         → community.docker collection via ECR auth
-
 - name: Deploy ssdlc-app to Staging on AWS EC2
   hosts: staging
   become: true
@@ -98,6 +83,7 @@
           retries: 3
 
     - name: Wait for application to become healthy
+      # checkov:skip=CKV2_ANSIBLE_1: HTTP is intentional for localhost health check — HTTPS not available on internal loopback
       ansible.builtin.uri:
         url: "http://localhost:{{ external_port }}/"
         status_code: 200

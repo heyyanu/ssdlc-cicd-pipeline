@@ -1,22 +1,11 @@
 ---
-# ansible/vars/main.yml
-# Direct equivalent of terraform/variables.tf
-# Jenkins passes ecr_registry, aws_region, and image_tag as --extra-vars
-# so they are never stored as plain text here.
+# Non-secret deployment defaults. Jenkins injects ECR values at runtime.
+app_name: "ssdlc-app"
+deployment_environment: "staging"
+image_tag: "latest"
+container_name: "staging-app"
 
-# ── Application (mirrors variables.tf defaults) ────────────────────────
-app_name: "ssdlc-app"              # var.app_name
-deployment_environment: "staging"             # var.environment
-image_tag: "latest"                # overridden by Jenkins with Git SHA
-container_name: "staging-app"      # docker_container.staging.name
+internal_port: 5000
+external_port: 8081
 
-# ── Ports (mirrors variables.tf defaults) ─────────────────────────────
-internal_port: 5000                # var.app_port  (Flask inside container)
-external_port: 8081                # host-side port (matches outputs.tf URL)
-
-# ── AWS (injected by Jenkins as --extra-vars; shown here for reference) ─
-# aws_region:    "us-east-1"
-# ecr_registry:  "123456789012.dkr.ecr.us-east-1.amazonaws.com"
-
-# ── SSH / connection ───────────────────────────────────────────────────
-ansible_user: ec2-user             # Amazon Linux 2; use 'ubuntu' for Ubuntu AMIs
+# Jenkins inventory supplies the SSH user from the SSH credential binding.

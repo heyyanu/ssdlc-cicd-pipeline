@@ -7,18 +7,16 @@ directory:
   - .
 
 check:
-  - CKV_DOCKER_1    # do not use sudo in RUN
-  - CKV_DOCKER_2    # health check exists
-  - CKV_DOCKER_3    # non-root user created
-  - CKV_DOCKER_4    # use COPY not ADD
-  - CKV_DOCKER_7    # do not use :latest tag
+  - CKV_DOCKER_1    # Ensure SSH port 22 is not exposed by the image.
+  - CKV_DOCKER_2    # Require a container health check.
+  - CKV_DOCKER_3    # Require a non-root container user.
+  - CKV_DOCKER_4    # Prefer COPY over ADD.
+  - CKV_DOCKER_7    # Require a specific base-image tag.
+  - CKV_DOCKER_8    # Require the final container USER to be non-root.
+  - CKV2_ANSIBLE_1  # The playbook polls Docker health status rather than using an HTTP uri task.
+  - CKV2_ANSIBLE_2  # Enforce appropriate become_user usage.
+  - CKV2_ANSIBLE_3  # Require rescue handling for Ansible blocks.
 
-  - CKV2_ANSIBLE_1  # do not use shell/command module when alternatives exist
-  - CKV2_ANSIBLE_2  # use become_user with become
-  - CKV2_ANSIBLE_3  # do not use no_log: false on sensitive tasks
-
-skip-check:
-  - CKV_DOCKER_8    # do not store credentials in ENV (handled via Jenkins credentials)
 
 output:
   - cli

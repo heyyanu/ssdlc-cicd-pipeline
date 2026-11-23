@@ -87,10 +87,40 @@ pipeline {
                             "https://awscli.amazonaws.com/awscli-exe-linux-${AWSCLI_ARCH}.zip" \
                             -o "$TMP_DIR/awscliv2.zip"
 
-                        # Python's standard-library zipfile module avoids
-                        # requiring unzip to be installed on the agent.
+                        # Python's zipfile extraction does not restore Unix
+                        # executable bits. Restore the permission bits recorded
+                        # in the official ZIP before running the installer.
                         python3 -m zipfile -e \
                             "$TMP_DIR/awscliv2.zip" "$TMP_DIR"
+                        python3 - "$TMP_DIR/awscliv2.zip" "$TMP_DIR" <<'PYEOF'
+import os
+import pathlib
+import sys
+import zipfile
+
+archive_path, extract_root = sys.argv[1:]
+root = pathlib.Path(extract_root)
+with zipfile.ZipFile(archive_path) as archive:
+    for entry in archive.infolist():
+        mode = (entry.external_attr >> 16) & 0o777
+        if not entry.is_dir() and mode & 0o111:
+            target = root / entry.filename
+            if target.is_file():
+                os.chmod(target, mode)
+PYEOF
+
+                        # Explicitly ensure the installer and primary CLI
+                        # launcher are executable even if ZIP mode metadata
+                        # is absent or incomplete.
+                        chmod 0755 "$TMP_DIR/aws/install" "$TMP_DIR/aws/dist/aws"
+                        if [ -f "$TMP_DIR/aws/dist/aws_completer" ]; then
+                            chmod 0755 "$TMP_DIR/aws/dist/aws_completer"
+                        fi
+
+                        # Fail clearly if the archive did not provide the
+                        # expected executable files.
+                        test -x "$TMP_DIR/aws/install"
+                        test -x "$TMP_DIR/aws/dist/aws"
 
                         rm -rf .ci-tools/aws-cli
                         rm -f .ci-tools/bin/aws
@@ -427,4 +457,5 @@ INI
         }
     }
 }
+
 

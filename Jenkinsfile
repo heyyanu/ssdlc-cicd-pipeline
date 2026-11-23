@@ -329,7 +329,34 @@ PYEOF
                 '''
             }
         }
+        stage('ECR Network Diagnostics') {
+            steps {
+                sh '''
+                    set -eu
 
+                    echo "===== Actual ECR Registry ====="
+                    echo "$ECR_REGISTRY"
+
+                    echo "===== DNS and HTTPS connectivity ====="
+
+                    curl -sS \
+                        --connect-timeout 10 \
+                        --max-time 20 \
+                        -o /dev/null \
+                        -w "HTTP Status: %{http_code}\\n" \
+                        "https://${ECR_REGISTRY}/v2/"
+
+                    echo "===== Docker Daemon Proxy ====="
+                    docker info --format \
+                        'HTTP={{.HTTPProxy}} HTTPS={{.HTTPSProxy}} NO_PROXY={{.NoProxy}}'
+
+                    echo "===== Docker Context ====="
+                    docker context show
+
+                    echo "Diagnostics completed!"
+                '''
+            }
+        }
         // 12. Push image to Amazon ECR.
         stage('Push to ECR') {
             steps {

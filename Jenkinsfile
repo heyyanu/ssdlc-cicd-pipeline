@@ -389,23 +389,27 @@ INI
                         set -eu
                         set +x
 
-                        # ── Install InSpec if not cached ──────────────────
-                        if [ ! -x .ci-tools/bin/inspec ]; then
-                            echo "Installing Chef InSpec..."
-                            INSPEC_VERSION="6.8.1"
-                            INSPEC_PKG="inspec_${INSPEC_VERSION}-1_amd64.deb"
-                            INSPEC_URL="https://packages.chef.io/files/stable/inspec/${INSPEC_VERSION}/ubuntu/22.04/${INSPEC_PKG}"
+                        # ── Install Cinc Auditor (free InSpec drop-in) ────
+                        # Chef InSpec requires a paid licence. Cinc Auditor is
+                        # the open-source community build — identical API and
+                        # profiles, freely available at cinc.sh.
+                        if [ ! -x .ci-tools/bin/cinc-auditor ]; then
+                            echo "Installing Cinc Auditor (open-source InSpec)..."
+                            CINC_VERSION="6.8.1"
+                            CINC_PKG="cinc-auditor_${CINC_VERSION}-1_amd64.deb"
+                            CINC_URL="https://downloads.cinc.sh/files/stable/cinc-auditor/${CINC_VERSION}/ubuntu/22.04/${CINC_PKG}"
                             TMP_DIR="$(mktemp -d)"
                             trap 'rm -rf "$TMP_DIR"' EXIT
-                            curl -fsSL "$INSPEC_URL" -o "$TMP_DIR/$INSPEC_PKG"
-                            dpkg -x "$TMP_DIR/$INSPEC_PKG" "$TMP_DIR/inspec-pkg"
-                            mkdir -p .ci-tools/inspec
-                            cp -r "$TMP_DIR/inspec-pkg/opt/inspec" .ci-tools/inspec/
-                            ln -sf "$PWD/.ci-tools/inspec/inspec/bin/inspec" .ci-tools/bin/inspec
+                            curl -fsSL "$CINC_URL" -o "$TMP_DIR/$CINC_PKG"
+                            dpkg -x "$TMP_DIR/$CINC_PKG" "$TMP_DIR/cinc-pkg"
+                            mkdir -p .ci-tools/cinc-auditor
+                            cp -r "$TMP_DIR/cinc-pkg/opt/cinc-auditor" .ci-tools/cinc-auditor/
+                            ln -sf "$PWD/.ci-tools/cinc-auditor/cinc-auditor/bin/cinc-auditor" \
+                                .ci-tools/bin/cinc-auditor
                             rm -rf "$TMP_DIR"
                             trap - EXIT
                         fi
-                        .ci-tools/bin/inspec version
+                        .ci-tools/bin/cinc-auditor version
 
                         # ── Write InSpec profile ──────────────────────────
                         mkdir -p inspec-profile/controls
@@ -480,11 +484,11 @@ RUBYEOF
 
                         echo "Running InSpec compliance scan against ${EC2_HOST}..."
 
-                        .ci-tools/bin/inspec exec inspec-profile \
+                        .ci-tools/bin/cinc-auditor exec inspec-profile \
                             -t "ssh://${EC2_SSH_USER}@${EC2_HOST}" \
                             -i "$EC2_SSH_KEY_FILE" \
                             --reporter cli json:inspec-output/inspec-report.json \
-                            --chef-license accept-no-persist \
+                             \
                             || INSPEC_EXIT=$?
 
                         # Exit code 0 = all passed

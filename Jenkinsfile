@@ -373,6 +373,147 @@ INI
             }
         }
 
+        // InSpec runs after Ansible deploy to verify the EC2 host and
+        // container meet the compliance baseline before DAST begins.
+        stage('Compliance - Chef InSpec') {
+            steps {
+                withCredentials([
+                    string(credentialsId: 'EC2_HOST', variable: 'EC2_HOST'),
+                    sshUserPrivateKey(
+                        credentialsId: 'EC2_SSH_PRIVATE_KEY',
+                        keyFileVariable: 'EC2_SSH_KEY_FILE',
+                        usernameVariable: 'EC2_SSH_USER'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        set +x
+
+                        # ── Install InSpec if not cached ──────────────────
+                        if [ ! -x .ci-tools/bin/inspec ]; then
+                            echo "Installing Chef InSpec..."
+                            INSPEC_VERSION="6.8.1"
+                            INSPEC_PKG="inspec_${INSPEC_VERSION}-1_amd64.deb"
+                            INSPEC_URL="https://packages.chef.io/files/stable/inspec/${INSPEC_VERSION}/ubuntu/22.04/${INSPEC_PKG}"
+                            TMP_DIR="$(mktemp -d)"
+                            trap 'rm -rf "$TMP_DIR"' EXIT
+                            curl -fsSL "$INSPEC_URL" -o "$TMP_DIR/$INSPEC_PKG"
+                            dpkg -x "$TMP_DIR/$INSPEC_PKG" "$TMP_DIR/inspec-pkg"
+                            mkdir -p .ci-tools/inspec
+                            cp -r "$TMP_DIR/inspec-pkg/opt/inspec" .ci-tools/inspec/
+                            ln -sf "$PWD/.ci-tools/inspec/inspec/bin/inspec" .ci-tools/bin/inspec
+                            rm -rf "$TMP_DIR"
+                            trap - EXIT
+                        fi
+                        .ci-tools/bin/inspec version
+
+                        # ── Write InSpec profile ──────────────────────────
+                        mkdir -p inspec-profile/controls
+
+                        cat > inspec-profile/inspec.yml << 'PROFILEEOF'
+name: ssdlc-staging-baseline
+title: SSDLC Staging Compliance Baseline
+maintainer: SSDLC Pipeline
+version: 1.0.0
+supports:
+  - platform: linux
+PROFILEEOF
+
+                        cat > inspec-profile/controls/docker.rb << 'RUBYEOF'
+# Control 1: Docker service must be running
+control 'docker-service-running' do
+  impact 1.0
+  title 'Docker service is running'
+  desc 'Docker must be active and running to serve the application container.'
+  describe service('docker') do
+    it { should be_running }
+    it { should be_enabled }
+  end
+end
+
+# Control 2: App container must be running
+control 'app-container-running' do
+  impact 1.0
+  title 'Staging app container is running'
+  desc 'The ssdlc-app staging container must be in a running state.'
+  describe command('docker inspect -f {{.State.Running}} staging-app') do
+    its('stdout.strip') { should eq 'true' }
+    its('exit_status') { should eq 0 }
+  end
+end
+
+# Control 3: Container must run as non-root
+control 'container-non-root-user' do
+  impact 1.0
+  title 'Container runs as non-root user'
+  desc 'The app container must not run as UID 0 (root).'
+  describe command("docker inspect -f '{{.Config.User}}' staging-app") do
+    its('stdout.strip') { should_not eq '' }
+    its('stdout.strip') { should_not eq '0' }
+    its('stdout.strip') { should_not eq 'root' }
+  end
+end
+
+# Control 4: SSH password authentication must be disabled
+control 'ssh-password-auth-disabled' do
+  impact 0.7
+  title 'SSH password authentication is disabled'
+  desc 'Only key-based SSH authentication is permitted on the staging host.'
+  describe sshd_config do
+    its('PasswordAuthentication') { should eq 'no' }
+  end
+end
+
+# Control 5: Container port must be listening
+control 'app-port-listening' do
+  impact 1.0
+  title 'Application port 8081 is listening'
+  desc 'The staging app must be reachable on port 8081.'
+  describe port(8081) do
+    it { should be_listening }
+  end
+end
+RUBYEOF
+
+                        # ── Run InSpec against the staging EC2 ───────────
+                        mkdir -p inspec-output
+
+                        echo "Running InSpec compliance scan against ${EC2_HOST}..."
+
+                        .ci-tools/bin/inspec exec inspec-profile \
+                            -t "ssh://${EC2_SSH_USER}@${EC2_HOST}" \
+                            -i "$EC2_SSH_KEY_FILE" \
+                            --reporter cli json:inspec-output/inspec-report.json \
+                            --chef-license accept-no-persist \
+                            || INSPEC_EXIT=$?
+
+                        # Exit code 0 = all passed
+                        # Exit code 100 = some controls failed (non-compliant)
+                        # Exit code 101 = some controls skipped
+                        # Anything else = InSpec itself failed
+                        INSPEC_EXIT="${INSPEC_EXIT:-0}"
+                        echo "InSpec exit code: ${INSPEC_EXIT}"
+
+                        if [ "$INSPEC_EXIT" -eq 0 ]; then
+                            echo "InSpec: All controls PASSED"
+                        elif [ "$INSPEC_EXIT" -eq 100 ]; then
+                            echo "InSpec: One or more controls FAILED — review inspec-report.json"
+                            exit 1
+                        elif [ "$INSPEC_EXIT" -eq 101 ]; then
+                            echo "InSpec: Some controls were skipped — review inspec-report.json"
+                        else
+                            echo "InSpec encountered an error (exit ${INSPEC_EXIT})"
+                            exit 1
+                        fi
+
+                        echo "Compliance scan completed!"
+                    '''
+                    archiveArtifacts artifacts: 'inspec-output/inspec-report.json',
+                                     fingerprint: true
+                }
+            }
+        }
+
         stage('DAST - OWASP ZAP') {
             steps {
                 withCredentials([

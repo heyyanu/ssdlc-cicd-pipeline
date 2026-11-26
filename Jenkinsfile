@@ -373,9 +373,10 @@ INI
             }
         }
 
-        // InSpec runs after Ansible deploy to verify the EC2 host and
-        // container meet the compliance baseline before DAST begins.
-        stage('Compliance - Chef InSpec') {
+        // Compliance scan runs in the official Cinc Auditor container.
+        // This avoids extracting a Debian package into a workspace and then
+        // relying on a relocated executable with broken embedded paths.
+        stage('Compliance - Cinc Auditor') {
             steps {
                 withCredentials([
                     string(credentialsId: 'EC2_HOST', variable: 'EC2_HOST'),
@@ -389,30 +390,39 @@ INI
                         set -eu
                         set +x
 
-                        # ── Install Cinc Auditor (free InSpec drop-in) ────
-                        # Chef InSpec requires a paid licence. Cinc Auditor is
-                        # the open-source community build — identical API and
-                        # profiles, freely available at cinc.sh.
-                        if [ ! -x .ci-tools/bin/cinc-auditor ]; then
-                            echo "Installing Cinc Auditor (open-source InSpec)..."
-                            CINC_VERSION="6.8.1"
-                            CINC_PKG="cinc-auditor_${CINC_VERSION}-1_amd64.deb"
-                            CINC_URL="https://downloads.cinc.sh/files/stable/cinc-auditor/${CINC_VERSION}/ubuntu/22.04/${CINC_PKG}"
-                            TMP_DIR="$(mktemp -d)"
-                            trap 'rm -rf "$TMP_DIR"' EXIT
-                            curl -fsSL "$CINC_URL" -o "$TMP_DIR/$CINC_PKG"
-                            dpkg -x "$TMP_DIR/$CINC_PKG" "$TMP_DIR/cinc-pkg"
-                            mkdir -p .ci-tools/cinc-auditor
-                            cp -r "$TMP_DIR/cinc-pkg/opt/cinc-auditor" .ci-tools/cinc-auditor/
-                            ln -sf "$PWD/.ci-tools/cinc-auditor/cinc-auditor/bin/cinc-auditor" \
-                                .ci-tools/bin/cinc-auditor
-                            rm -rf "$TMP_DIR"
-                            trap - EXIT
-                        fi
-                        .ci-tools/bin/cinc-auditor version
+                        : "${EC2_HOST:?EC2_HOST credential is empty}"
+                        : "${EC2_SSH_USER:?EC2_SSH_USER credential is empty}"
+                        test -s "$EC2_SSH_KEY_FILE"
+                        ssh-keygen -y -f "$EC2_SSH_KEY_FILE" >/dev/null
 
-                        # ── Write InSpec profile ──────────────────────────
-                        mkdir -p inspec-profile/controls
+                        case "$EC2_HOST" in
+                            *://*|*/*|*' '*)
+                                echo "EC2_HOST must contain only an IP address or hostname, without a scheme or path." >&2
+                                exit 1
+                                ;;
+                        esac
+
+                        CINC_IMAGE="cincproject/auditor:7.3.4"
+                        CINC_CONTAINER="cinc-auditor-${BUILD_NUMBER:-0}-$$"
+                        mkdir -p inspec-profile/controls inspec-output
+
+                        cleanup_cinc() {
+                            docker rm -f "$CINC_CONTAINER" >/dev/null 2>&1 || true
+                            rm -f inspec-ssh-config
+                        }
+                        trap cleanup_cinc EXIT
+
+                        echo "Pulling official Cinc Auditor image: ${CINC_IMAGE}"
+                        docker pull "$CINC_IMAGE"
+
+                        # Create an ephemeral container. docker cp is used instead
+                        # of bind mounts because the Docker daemon may run outside
+                        # the Jenkins container and may not see its workspace path.
+                        docker run -d \\
+                            --name "$CINC_CONTAINER" \\
+                            --entrypoint /bin/bash \\
+                            "$CINC_IMAGE" \\
+                            -lc 'while :; do sleep 3600; done' >/dev/null
 
                         cat > inspec-profile/inspec.yml << 'PROFILEEOF'
 name: ssdlc-staging-baseline
@@ -479,40 +489,77 @@ control 'app-port-listening' do
 end
 RUBYEOF
 
-                        # ── Run InSpec against the staging EC2 ───────────
-                        mkdir -p inspec-output
+                        # InSpec/Train reads the container's SSH config. This
+                        # retains the same host-key-checking behavior as the
+                        # existing Ansible staging inventory.
+                        cat > inspec-ssh-config << 'SSHEOF'
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    IdentitiesOnly yes
+    LogLevel ERROR
+SSHEOF
 
-                        echo "Running InSpec compliance scan against ${EC2_HOST}..."
+                        docker exec "$CINC_CONTAINER" mkdir -p \\
+                            /work /work/inspec-output /root/.ssh
+                        docker cp inspec-profile "$CINC_CONTAINER:/work/"
+                        docker cp inspec-ssh-config "$CINC_CONTAINER:/root/.ssh/config"
+                        docker cp "$EC2_SSH_KEY_FILE" "$CINC_CONTAINER:/tmp/jenkins-ec2-key"
+                        docker exec "$CINC_CONTAINER" chmod 0700 /root/.ssh
+                        docker exec "$CINC_CONTAINER" chmod 0600 \\
+                            /root/.ssh/config /tmp/jenkins-ec2-key
 
-                        .ci-tools/bin/cinc-auditor exec inspec-profile \
-                            -t "ssh://${EC2_SSH_USER}@${EC2_HOST}" \
-                            -i "$EC2_SSH_KEY_FILE" \
-                            --reporter cli json:inspec-output/inspec-report.json \
-                             \
-                            || INSPEC_EXIT=$?
+                        echo "Cinc Auditor version:"
+                        docker exec "$CINC_CONTAINER" cinc-auditor version
 
-                        # Exit code 0 = all passed
-                        # Exit code 100 = some controls failed (non-compliant)
-                        # Exit code 101 = some controls skipped
-                        # Anything else = InSpec itself failed
-                        INSPEC_EXIT="${INSPEC_EXIT:-0}"
-                        echo "InSpec exit code: ${INSPEC_EXIT}"
-
-                        if [ "$INSPEC_EXIT" -eq 0 ]; then
-                            echo "InSpec: All controls PASSED"
-                        elif [ "$INSPEC_EXIT" -eq 100 ]; then
-                            echo "InSpec: One or more controls FAILED — review inspec-report.json"
-                            exit 1
-                        elif [ "$INSPEC_EXIT" -eq 101 ]; then
-                            echo "InSpec: Some controls were skipped — review inspec-report.json"
+                        echo "Running compliance scan against ${EC2_HOST}..."
+                        if docker exec "$CINC_CONTAINER" cinc-auditor exec \\
+                            /work/inspec-profile \\
+                            -t "ssh://${EC2_SSH_USER}@${EC2_HOST}" \\
+                            -i /tmp/jenkins-ec2-key \\
+                            --reporter cli json:/work/inspec-output/inspec-report.json; then
+                            INSPEC_EXIT=0
                         else
-                            echo "InSpec encountered an error (exit ${INSPEC_EXIT})"
-                            exit 1
+                            INSPEC_EXIT=$?
                         fi
 
-                        echo "Compliance scan completed!"
+                        # Copy the report back even when controls fail, so Jenkins
+                        # can archive the compliance evidence in the stage post block.
+                        if docker exec "$CINC_CONTAINER" test -s \\
+                            /work/inspec-output/inspec-report.json; then
+                            docker cp \\
+                                "$CINC_CONTAINER:/work/inspec-output/inspec-report.json" \\
+                                inspec-output/inspec-report.json
+                        else
+                            echo "Cinc Auditor did not produce a JSON report." >&2
+                        fi
+
+                        echo "Cinc Auditor exit code: ${INSPEC_EXIT}"
+                        case "$INSPEC_EXIT" in
+                            0)
+                                echo "Compliance scan: all controls passed."
+                                ;;
+                            100)
+                                echo "Compliance scan: one or more controls failed." >&2
+                                exit 1
+                                ;;
+                            101)
+                                echo "Compliance scan: one or more controls were skipped; review the report."
+                                ;;
+                            *)
+                                echo "Cinc Auditor execution failed with exit code ${INSPEC_EXIT}." >&2
+                                exit 1
+                                ;;
+                        esac
+
+                        echo "Compliance scan completed."
                     '''
+                }
+            }
+            post {
+                always {
                     archiveArtifacts artifacts: 'inspec-output/inspec-report.json',
+                                     allowEmptyArchive: true,
                                      fingerprint: true
                 }
             }
